@@ -1,71 +1,95 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.font_manager import FontProperties
+from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
 
 
-# 定义粒子滤波器类
-class ParticleFilter:
-    def __init__(self, num_particles):
-        self.num_particles = num_particles  # 粒子数量
-        self.particles = np.random.normal(0, 1, num_particles)  # 初始化粒子
-        self.weights = np.ones(num_particles) / num_particles  # 初始化权重
+# 定义非线性动力学模型
+def dynamics_model(state, omega, dt):
+    return np.array([
+        state[0] + state[2] * np.cos(state[3]) * dt,
+        state[1] + state[2] * np.sin(state[3]) * dt,
+        state[2],
+        state[3] + omega * dt
+    ])
 
-    def predict(self):
-        # 预测步骤，粒子根据系统动力学和噪声进行演化
-        noise = np.random.normal(0, 1, self.num_particles)  # 系统噪声
-        self.particles += noise  # 粒子状态更新
 
-    def update(self, z):
-        # 更新步骤，根据观测数据更新粒子的权重
-        noise = np.random.normal(0, 1, self.num_particles)  # 观测噪声
-        likelihood = np.exp(-(z - (self.particles + noise)) ** 2 / 2)  # 计算似然
-        self.weights = likelihood * self.weights  # 更新权重
-        self.weights += 1.e-300  # 避免除以零
-        self.weights /= sum(self.weights)  # 归一化权重
+# 定义非线性测量模型
+def measurement_model(state, sensor_pos):
+    return np.sqrt((state[0] - sensor_pos[0]) ** 2 + (state[1] - sensor_pos[1]) ** 2)
 
-    def resample(self):
-        # 重采样步骤，根据权重重新采样粒子
-        indices = np.random.choice(range(self.num_particles), size=self.num_particles, p=self.weights)  # 采样索引
-        self.particles = self.particles[indices]  # 更新粒子
-        self.weights = np.ones(self.num_particles) / self.num_particles  # 重置权重
 
-    def estimate(self):
-        # 估计当前状态
-        return np.mean(self.particles)  # 返回粒子均值作为状态估计
+# 定义 IEKF 更新函数
+def iekf_update(state, P, z_meas, sensor_pos, Q, R, dt):
+    for _ in range(2):  # 进行两次迭代
+        # 预测
+        state_pred = dynamics_model(state, 0, dt)  # 零角速度预测
 
-    plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
-    plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+        # 计算雅可比矩阵
+        x_pred = state_pred[0]
+        y_pred = state_pred[1]
+        Hx = (x_pred - sensor_pos[0]) / np.sqrt((x_pred - sensor_pos[0]) ** 2 + (y_pred - sensor_pos[1]) ** 2)
+        Hy = (y_pred - sensor_pos[1]) / np.sqrt((x_pred - sensor_pos[0]) ** 2 + (y_pred - sensor_pos[1]) ** 2)
+        H = np.array([Hx, Hy, 0, 0])
 
-# 模拟一个简单的一维随机过程
-np.random.seed(0)  # 设置随机种子
-T = 50  # 总时间
-real_x = np.zeros(T)  # 真实状态
-z = np.zeros(T)  # 观测
+        # 计算卡尔曼增益
+        S = H @ P @ H.T + R
+        K = P @ H.T / S
 
-# 生成真实状态和观测数据
-for t in range(1, T):
-    real_x[t] = real_x[t - 1] + np.random.normal()  # 真实状态
-    z[t] = real_x[t] + np.random.normal()  # 带噪声的观测
+        # 状态更新
+        z_pred = measurement_model(state_pred, sensor_pos)
+        z_diff = z_meas - z_pred
+        state = state_pred + K * z_diff
 
-# 使用粒子滤波器估计状态
-pf = ParticleFilter(1000)  # 创建粒子滤波器实例，粒子数为1000
-estimates = np.zeros(T)  # 估计值
+        # 协方差更新
+        P = P - np.outer(K * S, K.T)
 
-# 进行滤波
-for t in range(T):
-    pf.predict()  # 预测
-    pf.update(z[t])  # 更新
-    estimates[t] = pf.estimate()  # 存储估计值
-    pf.resample()  # 重采样
+    return state, P
 
-# 绘图展示结果
-plt.figure(figsize=(10, 6))
-plt.plot(real_x, label='真实状态')  # 真实状态
-plt.plot(z, label='观测', linestyle='dotted')  # 观测
-plt.plot(estimates, label='估计', linestyle='dashed')  # 粒子滤波器估计
-plt.legend()  # 添加图例
-plt.xlabel('时间')  # x轴标签
-plt.ylabel('状态')  # y轴标签
-plt.title('粒子滤波器状态估计')  # 图标题
-plt.grid(True)  # 添加网格
-plt.show()  # 展示图像
+
+# 模拟参数
+dt = 0.1  # 时间步长
+steps = 200  # 时间步数
+
+# 初始化状态
+true_state = np.array([0.0, 0.0, 1.0, np.pi / 4])
+estimated_state = np.array([0.0, 0.0, 1.0, np.pi / 4])
+P = np.eye(4)  # 协方差矩阵初始化
+Q = np.eye(4) * 0.01  # 过程噪声协方差
+R = 0.1  # 测量噪声协方差
+
+# 传感器位置
+sensor_pos = np.array([5.0, 5.0])
+
+# 存储轨迹和测量值
+true_trajectory = np.zeros((2, steps))
+estimated_trajectory = np.zeros((2, steps))
+measurements = np.zeros(steps)
+
+# 模拟
+for step in range(steps):
+    omega = np.random.normal(0, 0.1)  # 生成角速度噪声
+    w = np.random.normal(0, np.sqrt(R))  # 生成测量噪声
+
+    true_state = dynamics_model(true_state, omega, dt)  # 真实状态更新
+
+    z_true = measurement_model(true_state, sensor_pos)  # 得到真实测量值
+    z_meas = z_true + w  # 添加噪声
+
+    estimated_state, P = iekf_update(estimated_state, P, z_meas, sensor_pos, Q, R, dt)  # IEKF 更新
+
+    true_trajectory[:, step] = true_state[:2]  # 存储真实轨迹
+    estimated_trajectory[:, step] = estimated_state[:2]  # 存储估计轨迹
+    measurements[step] = z_meas  # 存储测量值
+
+# 绘图
+plt.plot(true_trajectory[0, :], true_trajectory[1, :], label='真实轨迹')
+plt.plot(estimated_trajectory[0, :], estimated_trajectory[1, :], label='估计轨迹')
+plt.plot(sensor_pos[0], sensor_pos[1], 'ro', label='传感器位置')
+plt.xlabel('X 位置')
+plt.ylabel('Y 位置')
+plt.title('IEKF 非线性系统')
+plt.grid(True)
+plt.legend()
+plt.show()
